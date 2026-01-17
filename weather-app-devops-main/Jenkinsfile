@@ -1,0 +1,157 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = "weather-app"
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        K8S_NAMESPACE = "weather-app"
+        TERRAFORM_DIR = "terraform"
+        DOCKER_REGISTRY = "" // Leave empty for local, or use "your-registry.com/"
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo '🔄 Checking out code from GitHub'
+                git branch: 'main',
+                    url: 'https://github.com/34-stack/weather-app-devops.git'
+            }
+        }
+
+        stage('Validate Files') {
+            steps {
+                echo 'Validating project files'
+                sh '''
+                    echo "Checking required files..."
+                    [ -f Dockerfile ] && echo "✓ Dockerfile found" || exit 1
+                    [ -d app ] && echo "✓ App directory found" || exit 1
+                    [ -d terraform ] && echo "✓ Terraform directory found" || exit 1
+                    [ -d k8s ] && echo "✓ K8s directory found" || exit 1
+                '''
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                echo '🐳 Building Docker image'
+                script {
+                    sh """
+                        docker build -t ${DOCKER_REGISTRY}${IMAGE_NAME}:${IMAGE_TAG} .
+                        docker tag ${DOCKER_REGISTRY}${IMAGE_NAME}:${IMAGE_TAG} ${DOCKER_REGISTRY}${IMAGE_NAME}:latest
+
+                        # For Minikube - load image into Minikube's Docker daemon
+                        if command -v minikube &> /dev/null; then
+                            echo "Loading image into Minikube..."
+                            minikube image load ${IMAGE_NAME}:latest || echo "Skipping Minikube load"
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('Push Docker Image (Optional)') {
+            when {
+                expression { env.DOCKER_REGISTRY != "" }
+            }
+            steps {
+                echo 'Pushing Docker image to registry'
+                script {
+                    // Uncomment if pushing to registry
+                    // sh """
+                    //     docker push ${DOCKER_REGISTRY}${IMAGE_NAME}:${IMAGE_TAG}
+                    //     docker push ${DOCKER_REGISTRY}${IMAGE_NAME}:latest
+                    // """
+                    echo "Skipping push - using local registry"
+                }
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                echo '🔧 Initializing Terraform'
+                dir("${TERRAFORM_DIR}") {
+                    sh '''
+                        terraform init -upgrade
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Validate') {
+            steps {
+                echo 'Validating Terraform configuration'
+                dir("${TERRAFORM_DIR}") {
+                    sh '''
+                        terraform validate
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                echo 'Planning Terraform deployment'
+                dir("${TERRAFORM_DIR}") {
+                    sh '''
+                        terraform plan -out=tfplan
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            steps {
+                echo 'Applying Terraform configuration'
+                dir("${TERRAFORM_DIR}") {
+                    sh '''
+                        terraform apply -auto-approve tfplan
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                echo '🔍 Verifying Kubernetes deployment'
+                sh """
+                    echo "Checking pods..."
+                    kubectl get pods -n ${K8S_NAMESPACE}
+
+                    echo "Checking service..."
+                    kubectl get svc -n ${K8S_NAMESPACE}
+
+                    echo "Waiting for deployment to be ready..."
+                    kubectl wait --for=condition=available --timeout=300s deployment/weather-app -n ${K8S_NAMESPACE} || true
+                """
+            }
+        }
+
+        stage('Get Access URL') {
+            steps {
+                echo '🌐 Getting application access URL'
+                script {
+                    sh """
+                        echo "=================================="
+                        echo "Access your application using:"
+                        echo "minikube service weather-app-service -n ${K8S_NAMESPACE}"
+                        echo "=================================="
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+            echo 'Weather App deployed successfully'
+        }
+        failure {
+            echo 'Pipeline failed! Check the logs above'
+        }
+        always {
+            echo '🧹 Cleaning up workspace'
+            cleanWs()
+        }
+    }
+}
